@@ -1,21 +1,34 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"math/rand"
 	"net/http"
 	"time"
+
+	_ "github.com/lib/pq"
+)
+
+// POSTGRES_URL=postgres://postgres:123456789@localhost:5432/stocksdb?sslmode=disable
+const (
+	host     = "localhost"
+	port     = 5432
+	user     = "postgres"
+	password = "123456789"
+	db_name  = "go_url_shortener"
 )
 
 // URLShortener manages the mapping between short keys and original URLs
 type URLShortener struct {
-	urls map[string]string
+	//urls map[string]string
+	db   *sql.DB
 }
 
 // NewURLShortener creates a new instance of URLShortener
-func NewURLShortener() *URLShortener {
+func NewURLShortener(db *sql.DB) *URLShortener {
 	return &URLShortener{
-		urls: make(map[string]string),
+		db: db,
 	}
 }
 
@@ -42,7 +55,16 @@ func (us *URLShortener) HandleShorten(w http.ResponseWriter, r *http.Request) {
 
 	// Generate short key and store mapping
 	shortKey := generateShortKey()
-	us.urls[shortKey] = originalURL
+
+	_, err := us.db.Exec(
+		"INSERT INTO short_urls (original_url, short_code) VALUES ($1, $2)",
+		originalURL, shortKey,
+	)
+	if err != nil {
+		http.Error(w, "Failed to save URL: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	shortenedURL := fmt.Sprintf("http://localhost:8080/short/%s", shortKey)
 
 	// Set response headers
@@ -83,14 +105,23 @@ func (us *URLShortener) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Look up original URL
-	originalURL, exists := us.urls[shortKey]
-	if !exists {
-		http.Error(w, "Shortened URL not found", http.StatusNotFound)
-		return
-	}
+	var originalURL string
+	 err := us.db.QueryRow(
+		"Select original_url from short_urls where short_code = $1",
+		shortKey,
+	).Scan(&originalURL)
 
-	// Perform redirect
-	http.Redirect(w, r, originalURL, http.StatusMovedPermanently)
+	if err == sql.ErrNoRows {
+        http.Error(w, "Shortened URL not found", http.StatusNotFound)
+        return
+    }
+    if err != nil {
+        http.Error(w, "Database error: "+err.Error(), http.StatusInternalServerError)
+        return
+    }
+
+    http.Redirect(w, r, originalURL, http.StatusMovedPermanently)
+
 }
 
 // generateShortKey creates a random 6-character key
@@ -98,10 +129,10 @@ func generateShortKey() string {
 	// Seed random number generator once at startup would be better,
 	// but keeping it here for simplicity as per original code
 	rand.Seed(time.Now().UnixNano())
-	
+
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	const keyLength = 6
-	
+
 	result := make([]byte, keyLength)
 	for i := range result {
 		result[i] = charset[rand.Intn(len(charset))]
@@ -110,9 +141,25 @@ func generateShortKey() string {
 }
 
 func main() {
-	// Initialize shortener
-	shortener := NewURLShortener()
+	
 
+	psqlInfo := fmt.Sprintf("host=%s port=%d user=%s "+
+		"password=%s dbname=%s sslmode=disable",
+		host, port, user, password, db_name)
+
+	db, err := sql.Open("postgres", psqlInfo)
+
+	if err != nil {
+		panic(err)
+	}
+	defer db.Close()
+	err = db.Ping()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("Successfully connected!")
+	// Initialize shortener
+	shortener := NewURLShortener(db)
 	// Register handlers
 	http.HandleFunc("/shorten", shortener.HandleShorten)
 	http.HandleFunc("/short/", shortener.HandleRedirect)
